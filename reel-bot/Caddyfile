@@ -1,0 +1,4 @@
+# Caddy сам получает и продлевает сертификат HTTPS для домена из .env
+{$DOMAIN} {
+	reverse_proxy app:8000
+}
