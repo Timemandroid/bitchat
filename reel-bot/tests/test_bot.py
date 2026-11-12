@@ -398,3 +398,12 @@ def test_bot_removed_from_chat_falls_back_to_webhook_user(settings, fake):
     assert len(fallback) == 1 and fallback[0]["body"]["DIALOG_ID"] == "chat42"
     assert fallback[0]["body"]["ATTACH"]["BLOCKS"][0]["IMAGE"]
     assert c.app.state.store.get("mid-1:0")["details"]["delivery"]["chat_sender"] == "webhook_user"
+
+
+def test_privacy_pages(settings):
+    c = make_client(settings)
+    assert c.get("/privacy").status_code == 404
+    c = make_client(replace(settings, company_name="ТОО <Тест>", contact_email="info@example.kz"))
+    r = c.get("/privacy")
+    assert r.status_code == 200 and "ТОО &lt;Тест&gt;" in r.text and "info@example.kz" in r.text
+    assert c.get("/data-deletion").status_code == 200

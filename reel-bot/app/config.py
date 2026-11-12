@@ -72,6 +72,10 @@ class Settings:
     # Хранение
     media_retention_days: int = 30
 
+    # Страницы для Meta
+    company_name: str = ""
+    contact_email: str = ""
+
     @property
     def media_dir(self) -> Path:
         return self.data_dir / "media"
@@ -121,4 +125,6 @@ class Settings:
             bitrix_attach_video_max_mb=int(e("BITRIX_ATTACH_VIDEO_MAX_MB", "15")),
             bitrix_attach_frames=int(e("BITRIX_ATTACH_FRAMES", "3")),
             media_retention_days=int(e("MEDIA_RETENTION_DAYS", "30")),
+            company_name=e("COMPANY_NAME", ""),
+            contact_email=e("CONTACT_EMAIL", ""),
         )

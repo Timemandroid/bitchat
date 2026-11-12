@@ -10,7 +10,8 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
+from html import escape
 
 from . import brief as brief_mod
 from . import meta
@@ -126,6 +127,47 @@ def create_app(settings: Settings, background_maintenance: bool = True) -> FastA
                 queued += 1
         # отвечаем сразу, обработка идёт в фоне: иначе Meta повторит доставку
         return JSONResponse({"received": True, "queued": queued})
+
+    def _page(title: str, body: str) -> HTMLResponse:
+        if not settings.company_name or not settings.contact_email:
+            return HTMLResponse("Страница не настроена: заполните COMPANY_NAME и CONTACT_EMAIL", status_code=404)
+        html = (
+            "<!doctype html><html lang=ru><head><meta charset=utf-8>"
+            "<meta name=viewport content='width=device-width,initial-scale=1'>"
+            f"<title>{escape(title)}</title><style>body{{font:16px/1.6 system-ui,sans-serif;"
+            "max-width:720px;margin:40px auto;padding:0 16px;color:#222}}</style></head><body>"
+            f"<h1>{escape(title)}</h1>{body}</body></html>"
+        )
+        return HTMLResponse(html)
+
+    @app.get("/privacy")
+    def privacy():
+        c, m = escape(settings.company_name), escape(settings.contact_email)
+        return _page("Политика конфиденциальности", f"""
+<p>Этот сервис принадлежит компании {c} и помогает её менеджерам обрабатывать сообщения,
+которые клиенты отправляют в Instagram Direct компании.</p>
+<h2>Какие данные мы получаем</h2>
+<p>Когда вы пишете нам в Instagram Direct, сервис получает от Meta ваше сообщение, вложения
+(например, ролик или пост, которым вы поделились), ваш идентификатор в Instagram, имя и ник.</p>
+<h2>Зачем</h2>
+<p>Только чтобы менеджеры {c} увидели ваше обращение в нашей CRM и ответили вам. Для описания товара
+из присланного ролика кадры из него обрабатываются сервисом искусственного интеллекта Anthropic.
+Мы не продаём данные и не используем их для рекламы.</p>
+<h2>Хранение</h2>
+<p>Присланные ролики и кадры хранятся на нашем сервере до 30 дней и затем удаляются.
+Переписка хранится в CRM компании столько, сколько нужно для обслуживания клиентов.</p>
+<h2>Удаление данных</h2>
+<p>Чтобы удалить ваши данные, напишите на <a href="mailto:{m}">{m}</a> или в Direct компании.
+Мы удалим их в течение 30 дней. Подробнее: <a href="/data-deletion">удаление данных</a>.</p>
+<h2>Контакты</h2><p>{c}, <a href="mailto:{m}">{m}</a></p>""")
+
+    @app.get("/data-deletion")
+    def data_deletion():
+        c, m = escape(settings.company_name), escape(settings.contact_email)
+        return _page("Удаление данных", f"""
+<p>Чтобы удалить данные, которые сервис компании {c} получил из Instagram, напишите на
+<a href="mailto:{m}">{m}</a> и укажите ваш ник в Instagram. Мы удалим присланные ролики,
+кадры и записи о сообщениях в течение 30 дней и сообщим об этом в ответном письме.</p>""")
 
     @app.get("/m/{token}/{name}")
     def media(token: str, name: str):
