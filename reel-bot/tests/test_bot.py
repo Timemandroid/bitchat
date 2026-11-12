@@ -271,3 +271,130 @@ def test_token_is_refreshed_only_when_old_enough(settings, fake, monkeypatch):
     assert seen[0][0].endswith("/refresh_access_token")
     assert seen[0][1]["grant_type"] == "ig_refresh_token"
     assert meta.current_token(settings) == "NEW-TOKEN"
+
+
+# ------------------------------------------------------------------ бот в чате Битрикс24
+
+
+def lead_with_id() -> list[dict]:
+    return [{"ID": "15", "TITLE": "", "NAME": "", "LAST_NAME": "", "IM": [{"VALUE": "imol|x|111|1"}]}]
+
+
+def test_connect_registers_bot_adds_it_to_chat_and_saves(settings, fake, capsys):
+    from app import bitrix_setup
+
+    assert bitrix_setup.cmd_connect(settings, "chat42", "reel_bot") == 0
+    reg = fake.by_path("imbot.v2.Bot.register")[0]["body"]["fields"]
+    assert reg["code"] == "reel_bot" and reg["eventMode"] == "fetch"
+    assert reg["properties"]["name"] == "Рилс бот"
+    assert 20 <= len(reg["botToken"]) <= 40
+    add = fake.by_path("im.chat.user.add")[0]["body"]
+    assert add == {"CHAT_ID": 42, "USERS": [501]}
+    send = fake.by_path("imbot.v2.Chat.Message.send")[0]["body"]
+    assert send["botId"] == 501 and send["dialogId"] == "chat42" and send["botToken"] == reg["botToken"]
+    saved = bitrix_setup.load_bot(settings)
+    assert saved == {"code": "reel_bot", "bot_token": reg["botToken"], "bot_id": 501,
+                     "name": "Рилс бот", "dialog_id": "chat42"}
+    assert "Бот подключён к чату" in capsys.readouterr().out
+
+
+def test_connect_twice_keeps_the_same_token(settings, fake):
+    from app import bitrix_setup
+
+    bitrix_setup.cmd_connect(settings, "chat42", "reel_bot")
+    bitrix_setup.cmd_connect(settings, "chat42", "reel_bot")
+    tokens = {c["body"]["fields"]["botToken"] for c in fake.by_path("imbot.v2.Bot.register")}
+    assert len(tokens) == 1
+
+
+def test_connect_refuses_open_line_chat(settings, fake, capsys):
+    from app import bitrix_setup
+
+    fake.dialog = {"name": "Анна, Instagram", "type": "lines", "entity_type": "LINES"}
+    assert bitrix_setup.cmd_connect(settings, "chat77", "reel_bot") == 1
+    assert not fake.by_path("imbot.v2.Bot.register")
+    assert "чат открытой линии" in capsys.readouterr().out
+
+
+def test_connect_asks_for_manual_add_when_bot_cannot_join(settings, fake, capsys):
+    from app import bitrix_setup
+
+    fake.chat_add_fails = True
+    assert bitrix_setup.cmd_connect(settings, "chat42", "reel_bot") == 1
+    out = capsys.readouterr().out
+    assert "Добавить участников" in out and "Рилс бот" in out
+    assert "dialog_id" not in bitrix_setup.load_bot(settings)
+
+
+def test_connect_rejects_malformed_chat_id(settings, fake, capsys):
+    from app import bitrix_setup
+
+    assert bitrix_setup.cmd_connect(settings, "Менеджеры", "reel_bot") == 1
+    assert not fake.calls
+    assert "chat123" in capsys.readouterr().out
+
+
+def test_chats_command_lists_only_group_chats(settings, fake, capsys):
+    from app import bitrix_setup
+
+    fake.recent = [{"id": "chat5", "title": "Менеджеры Instagram", "type": "chat"},
+                   {"id": "12", "title": "Иван Петров", "type": "user"}]
+    assert bitrix_setup.cmd_chats(settings) == 0
+    out = capsys.readouterr().out
+    assert "chat5" in out and "Менеджеры Instagram" in out and "Иван" not in out
+    params = fake.by_path("im.recent.list")[0]["body"]
+    assert params["SKIP_OPENLINES"] == "Y"
+
+
+def test_reel_is_posted_by_bot_with_frames_and_card_link(settings, fake):
+    from app import bitrix_setup
+
+    bitrix_setup.cmd_connect(settings, "chat42", "reel_bot")
+    fake.calls.clear()
+    fake.leads = lead_with_id()
+    c = make_client(settings)
+    post(c, event(f"http://127.0.0.1:{fake.port}/cdn/reel.mp4"))
+
+    assert not fake.by_path("im.message.add")
+    body = fake.by_path("imbot.v2.Chat.Message.send")[0]["body"]
+    assert body["dialogId"] == "chat42" and body["botId"] == 501
+    msg = body["fields"]["message"]
+    assert "Товар: женская куртка бомбер" in msg
+    assert msg.rstrip().endswith("/crm/lead/details/15/")
+    blocks = body["fields"]["attach"]["BLOCKS"]
+    images = blocks[0]["IMAGE"]
+    assert len(images) == 3
+    assert images[0]["LINK"].startswith("https://reels.example.kz/m/") and images[0]["LINK"].endswith("/frame_01.jpg")
+    assert blocks[1]["LINK"]["NAME"] == "Смотреть ролик" and blocks[1]["LINK"]["LINK"].endswith("/video.mp4")
+    # ссылки на кадры из карточки действительно открываются
+    frame_path = images[0]["LINK"].replace("https://reels.example.kz", "")
+    assert c.get(frame_path).headers["content-type"] == "image/jpeg"
+    d = c.app.state.store.get("mid-1:0")["details"]["delivery"]
+    assert d["chat_sender"] == "bot" and d["chat_attach"] is True and d["target"] == "timeline"
+
+
+def test_rejected_attach_is_retried_as_plain_text(settings, fake):
+    from app import bitrix_setup
+
+    bitrix_setup.cmd_connect(settings, "chat42", "reel_bot")
+    fake.calls.clear()
+    fake.attach_fail = True
+    c = make_client(settings)
+    post(c, event(f"http://127.0.0.1:{fake.port}/cdn/reel.mp4"))
+    sends = fake.by_path("imbot.v2.Chat.Message.send")
+    assert len(sends) == 2 and "attach" not in sends[1]["body"]["fields"]
+    assert c.app.state.store.get("mid-1:0")["details"]["delivery"]["chat_attach"] is False
+
+
+def test_bot_removed_from_chat_falls_back_to_webhook_user(settings, fake):
+    from app import bitrix_setup
+
+    bitrix_setup.cmd_connect(settings, "chat42", "reel_bot")
+    fake.calls.clear()
+    fake.bot_in_chat = False
+    c = make_client(settings)
+    post(c, event(f"http://127.0.0.1:{fake.port}/cdn/reel.mp4"))
+    fallback = fake.by_path("im.message.add")
+    assert len(fallback) == 1 and fallback[0]["body"]["DIALOG_ID"] == "chat42"
+    assert fallback[0]["body"]["ATTACH"]["BLOCKS"][0]["IMAGE"]
+    assert c.app.state.store.get("mid-1:0")["details"]["delivery"]["chat_sender"] == "webhook_user"

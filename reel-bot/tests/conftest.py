@@ -40,6 +40,12 @@ class Fake:
         self.claude_status = 200
         self.comment_fail_with_video = False
         self.port = 0
+        # чат и бот в поддельном Битрикс24
+        self.dialog = {"name": "Менеджеры", "type": "chat", "entity_type": ""}
+        self.recent = []
+        self.bot_in_chat = False
+        self.chat_add_fails = False
+        self.attach_fail = False
 
     def by_path(self, part: str) -> list[dict]:
         return [c for c in self.calls if part in c["path"]]
@@ -100,7 +106,27 @@ def _handler(fake: Fake):
                     return self._send(400, {"error": "ERROR_FILE", "error_description": "too large"})
                 return self._send(200, {"result": 77})
             if self.path.endswith("im.message.add.json"):
+                if fake.attach_fail and body.get("ATTACH"):
+                    return self._send(400, {"error": "ATTACH_ERROR", "error_description": "bad attach"})
                 return self._send(200, {"result": 5})
+            if self.path.endswith("im.dialog.get.json"):
+                return self._send(200, {"result": fake.dialog})
+            if self.path.endswith("im.recent.list.json"):
+                return self._send(200, {"result": {"items": fake.recent, "hasMore": False}})
+            if self.path.endswith("imbot.v2.Bot.register.json"):
+                return self._send(200, {"result": {"bot": {"id": 501}, "users": []}})
+            if self.path.endswith("im.chat.user.add.json"):
+                if fake.chat_add_fails:
+                    return self._send(400, {"error": "ACCESS_ERROR", "error_description": "no rights"})
+                fake.bot_in_chat = True
+                return self._send(200, {"result": True})
+            if self.path.endswith("imbot.v2.Chat.Message.send.json"):
+                if not fake.bot_in_chat:
+                    return self._send(400, {"error": "ACCESS_DENIED",
+                                            "error_description": "Бот не является участником чата"})
+                if fake.attach_fail and body.get("fields", {}).get("attach"):
+                    return self._send(400, {"error": "ATTACH_ERROR", "error_description": "bad attach"})
+                return self._send(200, {"result": {"id": 900, "uuidMap": {}, "failureMap": {}}})
             return self._send(404, {"error": "ERROR_METHOD_NOT_FOUND"})
 
     return H
@@ -143,7 +169,7 @@ def settings(tmp_path, fake) -> Settings:
         claude_base_url=base,
         anthropic_api_key="test-key",
         bitrix_webhook_url=f"{base}/rest/1/secret",
-        bitrix_fallback_dialog_id="chat42",
+        bitrix_dialog_id="chat42",
         bitrix_match_retries=1,
         bitrix_match_retry_sec=0,
     )

@@ -48,6 +48,9 @@ def main() -> None:
             print(f"    медиа: {d['media']['error']}")
         if d.get("brief_error"):
             print(f"    бриф: {d['brief_error']}")
+        if delivery.get("chat_sender"):
+            sender = "бот" if delivery["chat_sender"] == "bot" else "владелец вебхука"
+            print(f"    чат: написал {sender}, кадры {'приложены' if delivery.get('chat_attach') else 'не приложены'}")
         if delivery.get("match_info"):
             print(f"    поиск в Битрикс24: {delivery['match_info']}")
         for k in ("match_error", "comment_error", "chat_error", "note"):

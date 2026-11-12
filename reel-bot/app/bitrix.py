@@ -114,6 +114,67 @@ class Bitrix:
         body = self.call("crm.timeline.comment.add", {"fields": fields}, timeout=300)
         return int(body.get("result") or 0)
 
-    def send_message(self, dialog_id: str, text: str) -> int:
-        body = self.call("im.message.add", {"DIALOG_ID": dialog_id, "MESSAGE": text})
+    def send_message(self, dialog_id: str, text: str, attach: dict | None = None) -> int:
+        """Сообщение от имени сотрудника, который создал вебхук."""
+        params: dict = {"DIALOG_ID": dialog_id, "MESSAGE": text, "URL_PREVIEW": "N"}
+        if attach:
+            params["ATTACH"] = attach
+        body = self.call("im.message.add", params)
         return int(body.get("result") or 0)
+
+    # ------------------------------------------------------------ чат-бот
+
+    def bot_register(self, code: str, token: str, name: str) -> int:
+        """Регистрирует бота. Повторный вызов с тем же code возвращает того же бота без изменений."""
+        fields = {
+            "code": code,
+            "botToken": token,
+            "properties": {"name": name, "workPosition": "Разбор рилсов из Instagram", "color": "AQUA"},
+            "type": "bot",
+            # бот только пишет в чат и ничего не читает, поэтому события ему не нужны
+            "eventMode": "fetch",
+        }
+        body = self.call("imbot.v2.Bot.register", {"fields": fields})
+        return int(((body.get("result") or {}).get("bot") or {}).get("id") or 0)
+
+    def bot_send(self, bot_id: int, token: str, dialog_id: str, text: str, attach: dict | None = None) -> int:
+        fields: dict = {"message": text, "urlPreview": False}
+        if attach:
+            fields["attach"] = attach
+        body = self.call(
+            "imbot.v2.Chat.Message.send",
+            {"botId": bot_id, "botToken": token, "dialogId": dialog_id, "fields": fields},
+        )
+        return int((body.get("result") or {}).get("id") or 0)
+
+    def chat_add_users(self, chat_id: int, user_ids: list[int]) -> bool:
+        body = self.call("im.chat.user.add", {"CHAT_ID": chat_id, "USERS": user_ids})
+        return bool(body.get("result"))
+
+    def dialog_info(self, dialog_id: str) -> dict:
+        body = self.call("im.dialog.get", {"DIALOG_ID": dialog_id})
+        return body.get("result") or {}
+
+    def recent_chats(self) -> list[dict]:
+        body = self.call("im.recent.list", {"SKIP_OPENLINES": "Y", "SKIP_DIALOG": "Y", "LIMIT": 50})
+        result = body.get("result") or {}
+        items = result.get("items", []) if isinstance(result, dict) else result
+        return [i for i in items if isinstance(i, dict) and str(i.get("id", "")).startswith("chat")]
+
+
+def is_open_line(info: dict) -> bool:
+    """Чат открытой линии: в нём сотрудники переписываются с клиентом через внешний канал."""
+    values = [str(info.get(k) or "").lower() for k in ("type", "entity_type", "message_type")]
+    return any(v in ("lines", "livechat") for v in values)
+
+
+def build_attach(video_url: str, frame_urls: list[str]) -> dict | None:
+    """Карточка под сообщением: кадры картинками и ссылка на ролик."""
+    blocks: list[dict] = []
+    if frame_urls:
+        blocks.append({"IMAGE": [{"NAME": f"Кадр {i}", "LINK": u} for i, u in enumerate(frame_urls, start=1)]})
+    if video_url:
+        blocks.append({"LINK": {"NAME": "Смотреть ролик", "LINK": video_url}})
+    if not blocks:
+        return None
+    return {"ID": 1, "COLOR_TOKEN": "primary", "BLOCKS": blocks}

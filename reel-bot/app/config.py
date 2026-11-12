@@ -63,7 +63,9 @@ class Settings:
     bitrix_match_window_min: int = 30
     bitrix_match_retries: int = 3
     bitrix_match_retry_sec: float = 5.0
-    bitrix_fallback_dialog_id: str = ""
+    bitrix_dialog_id: str = ""  # чат менеджеров, например chat123
+    bitrix_chat_full: bool = True  # в чат всегда уходит полный бриф, а не только уведомление
+    bitrix_bot_name: str = "Рилс бот"
     bitrix_attach_video_max_mb: int = 15
     bitrix_attach_frames: int = 3
 
@@ -73,6 +75,10 @@ class Settings:
     @property
     def media_dir(self) -> Path:
         return self.data_dir / "media"
+
+    @property
+    def bot_file(self) -> Path:
+        return self.data_dir / "bitrix_bot.json"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -109,7 +115,9 @@ class Settings:
             bitrix_match_window_min=int(e("BITRIX_MATCH_WINDOW_MIN", "30")),
             bitrix_match_retries=int(e("BITRIX_MATCH_RETRIES", "3")),
             bitrix_match_retry_sec=float(e("BITRIX_MATCH_RETRY_SEC", "5")),
-            bitrix_fallback_dialog_id=e("BITRIX_FALLBACK_DIALOG_ID", ""),
+            bitrix_dialog_id=e("BITRIX_DIALOG_ID", "") or e("BITRIX_FALLBACK_DIALOG_ID", ""),
+            bitrix_chat_full=_bool("BITRIX_CHAT_FULL", True),
+            bitrix_bot_name=e("BITRIX_BOT_NAME", "Рилс бот"),
             bitrix_attach_video_max_mb=int(e("BITRIX_ATTACH_VIDEO_MAX_MB", "15")),
             bitrix_attach_frames=int(e("BITRIX_ATTACH_FRAMES", "3")),
             media_retention_days=int(e("MEDIA_RETENTION_DAYS", "30")),

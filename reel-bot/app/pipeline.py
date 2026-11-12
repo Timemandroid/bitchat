@@ -11,7 +11,8 @@ import anthropic
 from . import brief as brief_mod
 from . import frames as frames_mod
 from . import meta
-from .bitrix import Bitrix, BitrixError, Match
+from .bitrix import Bitrix, BitrixError, Match, build_attach
+from .bitrix_setup import load_bot
 from .config import Settings
 from .store import Store
 
@@ -58,7 +59,8 @@ class Pipeline:
     # ------------------------------------------------------------ доставка
 
     def _deliver(self, item: meta.Incoming, profile: dict, text: str, frame_paths: list[Path],
-                 video_path: Path | None) -> dict:
+                 video_path: Path | None, video_url: str = "", frame_urls: list[str] | None = None) -> dict:
+        frame_urls = frame_urls or []
         out: dict = {"target": "none"}
         if not self.bitrix.enabled:
             out["note"] = "BITRIX_WEBHOOK_URL не задан, результат только в журнале"
@@ -101,19 +103,46 @@ class Pipeline:
                 log.error("комментарий в ленту не добавлен: %s", e)
                 match = None
 
-        if self.s.bitrix_fallback_dialog_id:
-            if match:
+        bot = load_bot(self.s)
+        dialog_id = bot.get("dialog_id") or self.s.bitrix_dialog_id
+        if dialog_id:
+            if match and self.s.bitrix_chat_full:
+                msg = f"{text}\n\nКарточка клиента: {match.url}"
+            elif match:
                 msg = f"Клиент прислал ролик в Instagram, бриф лежит в карточке: {match.url}"
             else:
                 msg = "Карточка клиента не найдена автоматически.\n" + text
+            attach = build_attach(video_url, frame_urls[: self.s.bitrix_attach_frames])
             try:
-                out["chat_message_id"] = self.bitrix.send_message(self.s.bitrix_fallback_dialog_id, msg)
+                out.update(self._send_chat(bot, dialog_id, msg, attach))
                 if not match:
                     out["target"] = "chat"
             except BitrixError as e:
                 out["chat_error"] = str(e)
                 log.error("сообщение в чат не отправлено: %s", e)
         return out
+
+    def _send_chat(self, bot: dict, dialog_id: str, msg: str, attach: dict | None) -> dict:
+        """Пишет от имени бота. Если бот недоступен, пишет от имени владельца вебхука."""
+
+        def with_attach_retry(send) -> tuple[int, bool]:
+            if attach:
+                try:
+                    return send(attach), True
+                except BitrixError as e:
+                    log.warning("сообщение с кадрами не принято (%s), повтор без них", e)
+            return send(None), False
+
+        if bot.get("bot_id") and bot.get("bot_token") and bot.get("dialog_id") == dialog_id:
+            try:
+                mid, attached = with_attach_retry(
+                    lambda a: self.bitrix.bot_send(int(bot["bot_id"]), bot["bot_token"], dialog_id, msg, a)
+                )
+                return {"chat_message_id": mid, "chat_sender": "bot", "chat_attach": attached}
+            except BitrixError as e:
+                log.error("бот не смог написать в чат (%s), пишу от имени владельца вебхука", e)
+        mid, attached = with_attach_retry(lambda a: self.bitrix.send_message(dialog_id, msg, a))
+        return {"chat_message_id": mid, "chat_sender": "webhook_user", "chat_attach": attached}
 
     # ------------------------------------------------------------ основной шаг
 
@@ -156,7 +185,9 @@ class Pipeline:
             text = self._compose(item, profile, media, video_url, duration, brief_lines)
             details["text"] = text
             video_path = media.path if media.kind == "video" else None
-            details["delivery"] = self._deliver(item, profile, text, [f.path for f in frames], video_path)
+            frame_urls = [f"{self.s.public_base_url}/m/{token}/{f.path.name}" for f in frames]
+            details["delivery"] = self._deliver(item, profile, text, [f.path for f in frames], video_path,
+                                                video_url, frame_urls)
             status = "done" if media.path is not None else "no_media"
         except Exception as e:  # обработка идёт в фоне, поэтому ошибку нужно записать, а не потерять
             log.exception("обработка %s не удалась", item.key)
