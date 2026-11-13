@@ -29,7 +29,7 @@ class Settings:
     meta_app_secrets: tuple[str, ...] = ()
     verify_signature: bool = True
     ig_access_token: str = ""
-    ig_graph_host: str = "https://graph.instagram.com"
+    ig_graph_host: str = "https://graph.facebook.com"
     ig_api_version: str = "v27.0"
     process_types: tuple[str, ...] = ("ig_reel", "reel", "ig_post", "share")
     media_allowed_hosts: tuple[str, ...] = (
@@ -87,6 +87,11 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         e = os.environ.get
+        # Токен входа через Instagram начинается с IG и живёт на graph.instagram.com.
+        # Токен Страницы (единый вход, вход через Facebook) работает через graph.facebook.com.
+        default_host = (
+            "https://graph.instagram.com" if e("IG_ACCESS_TOKEN", "").startswith("IG") else "https://graph.facebook.com"
+        )
         return cls(
             data_dir=Path(e("DATA_DIR", "/data")),
             public_base_url=e("PUBLIC_BASE_URL", "").rstrip("/"),
@@ -94,7 +99,7 @@ class Settings:
             meta_app_secrets=_list("META_APP_SECRET", ""),
             verify_signature=_bool("VERIFY_SIGNATURE", True),
             ig_access_token=e("IG_ACCESS_TOKEN", ""),
-            ig_graph_host=e("IG_GRAPH_HOST", "https://graph.instagram.com").rstrip("/"),
+            ig_graph_host=(e("IG_GRAPH_HOST", "") or default_host).rstrip("/"),
             ig_api_version=e("IG_API_VERSION", "v27.0"),
             process_types=_list("PROCESS_TYPES", "ig_reel,reel,ig_post,share"),
             media_allowed_hosts=_list(

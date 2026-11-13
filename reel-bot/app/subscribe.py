@@ -1,4 +1,4 @@
-"""Включает доставку сообщений для аккаунта Instagram: python -m app.subscribe
+"""Включает доставку сообщений для аккаунта Instagram или его Страницы Facebook: python -m app.subscribe
 
 Один раз после настройки вебхука в кабинете Meta. Команда печатает ответы Instagram как есть,
 чтобы ошибку было видно сразу.
@@ -18,8 +18,10 @@ def run(settings: Settings, fields: str = "messages") -> bool:
         return False
     base = f"{settings.ig_graph_host}/{settings.ig_api_version}"
     ok = True
+    # С токеном Страницы /me это сама Страница, подписка оформляется на неё
+    me_fields = "user_id,username" if meta.is_instagram_login_token(token) else "id,name,instagram_business_account"
     steps = [
-        ("Аккаунт", "GET", f"{base}/me", {"fields": "user_id,username"}),
+        ("Аккаунт", "GET", f"{base}/me", {"fields": me_fields}),
         ("Включение подписки", "POST", f"{base}/me/subscribed_apps", {"subscribed_fields": fields}),
         ("Текущие подписки", "GET", f"{base}/me/subscribed_apps", {}),
     ]

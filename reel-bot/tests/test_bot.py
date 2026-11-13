@@ -2,6 +2,8 @@ import hashlib
 import hmac
 import json
 import subprocess
+
+import pytest
 from dataclasses import replace
 
 from fastapi.testclient import TestClient
@@ -407,3 +409,27 @@ def test_privacy_pages(settings):
     r = c.get("/privacy")
     assert r.status_code == 200 and "ТОО &lt;Тест&gt;" in r.text and "info@example.kz" in r.text
     assert c.get("/data-deletion").status_code == 200
+
+
+def test_page_token_is_not_refreshed_and_subscribes_page(settings, fake, monkeypatch, capsys):
+    """Единый вход: токен Страницы (EAA...) не обновляется, /me запрашивается с полями Страницы."""
+    from app import subscribe
+
+    page = replace(settings, ig_access_token="EAAG-page-token-000000000000")
+    monkeypatch.setattr(meta.httpx, "get", lambda *a, **k: pytest.fail("токен Страницы не должен обновляться"))
+    assert meta.refresh_token_if_needed(page, min_age_days=0) == "обновление не требуется"
+    assert meta.current_token(page) == "EAAG-page-token-000000000000"
+
+    assert subscribe.run(page) is True
+    me = [c for c in fake.calls if c["method"] == "GET" and c["path"].startswith("/v27.0/me?")]
+    assert "instagram_business_account" in me[0]["path"] and "user_id" not in me[0]["path"]
+
+
+def test_graph_host_follows_token_kind(monkeypatch):
+    from app.config import Settings
+
+    monkeypatch.delenv("IG_GRAPH_HOST", raising=False)
+    monkeypatch.setenv("IG_ACCESS_TOKEN", "EAAG-page")
+    assert Settings.from_env().ig_graph_host == "https://graph.facebook.com"
+    monkeypatch.setenv("IG_ACCESS_TOKEN", "IGAA-insta")
+    assert Settings.from_env().ig_graph_host == "https://graph.instagram.com"

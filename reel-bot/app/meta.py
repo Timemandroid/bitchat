@@ -187,6 +187,11 @@ def download_media(settings: Settings, url: str, dest_dir: Path) -> Media:
 # ---------------------------------------------------------------- токен и профиль
 
 
+def is_instagram_login_token(token: str) -> bool:
+    """Токены входа через Instagram начинаются с IG, токены Страницы Facebook с EAA."""
+    return token.startswith("IG")
+
+
 def _token_file(settings: Settings) -> Path:
     return settings.data_dir / "ig_token.json"
 
@@ -206,6 +211,9 @@ def refresh_token_if_needed(settings: Settings, min_age_days: float = 7.0) -> st
     """Долгий токен живёт 60 дней. Обновляем заранее, не чаще раза в неделю."""
     if not settings.ig_access_token:
         return "нет токена"
+    if not is_instagram_login_token(settings.ig_access_token):
+        # Токен Страницы или системного пользователя этим способом не обновляется
+        return "обновление не требуется"
     tf = _token_file(settings)
     now = time.time()
     try:
