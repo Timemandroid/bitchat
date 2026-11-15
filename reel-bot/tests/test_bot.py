@@ -103,6 +103,23 @@ def test_plain_video_type_is_ignored(settings, fake):
 # ------------------------------------------------------------------ полный путь
 
 
+def test_openai_compatible_ai_falls_back_to_next_model(settings, fake):
+    from app import brief
+
+    s = replace(settings, ai_base_url=f"http://127.0.0.1:{fake.port}/v1", ai_api_key="k",
+                ai_models=("broken-model", "gemini-flash"))
+    got, duration = frames.extract_frames(fake.video, s.data_dir, count=2, max_side=320)
+    res = brief.make_brief(s, brief.build_client(s), got, "подпись", "", duration, "video")
+    assert res.error == "" and res.model == "gemini-flash"
+    assert res.data["product"].startswith("женская куртка")
+    calls = fake.by_path("/chat/completions")
+    assert [c["body"]["model"] for c in calls] == ["broken-model", "gemini-flash"]
+    assert calls[0]["headers"]["authorization"] == "Bearer k"
+    images = [b for b in calls[1]["body"]["messages"][1]["content"] if b["type"] == "image_url"]
+    assert len(images) == 2 and images[0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+    assert not fake.by_path("/v1/messages")
+
+
 def test_reel_goes_to_matched_lead_with_brief_and_video(settings, fake):
     fake.leads = [
         {"ID": "10", "TITLE": "Кто-то другой", "NAME": "Пётр", "LAST_NAME": "", "IM": []},

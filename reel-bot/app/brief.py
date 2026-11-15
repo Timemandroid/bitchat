@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import anthropic
+import httpx
 
 from .config import Settings
 from .frames import Frame
@@ -95,7 +96,13 @@ class BriefResult:
     usage: dict = field(default_factory=dict)
 
 
-def build_client(settings: Settings) -> anthropic.Anthropic:
+def build_client(settings: Settings) -> anthropic.Anthropic | httpx.Client:
+    if settings.ai_base_url:
+        return httpx.Client(
+            base_url=settings.ai_base_url,
+            headers={"Authorization": f"Bearer {settings.ai_api_key}"},
+            timeout=180,
+        )
     kwargs: dict = {}
     if settings.anthropic_api_key:
         kwargs["api_key"] = settings.anthropic_api_key
@@ -163,9 +170,67 @@ def _user_content(frames: list[Frame], caption: str, client_text: str, duration:
     return content
 
 
+def _parse_json(text: str):
+    """Модели без строгого режима JSON любят оборачивать ответ в ```json ... ```."""
+    text = text.strip()
+    start, end = text.find("{"), text.rfind("}")
+    return json.loads(text[start : end + 1] if start != -1 and end > start else text)
+
+
+def _openai_brief(
+    settings: Settings, client: httpx.Client, frames: list[Frame], caption: str,
+    client_text: str, duration: float, kind: str, catalog: str, result: BriefResult,
+) -> BriefResult:
+    """Запрос в формате OpenAI. Модели из AI_MODELS пробуются по очереди."""
+    system = "\n\n".join(b["text"] for b in _system_blocks(settings, catalog))
+    system += (
+        "\n\nОтветь одним объектом JSON без пояснений и без markdown. Поля и типы: "
+        + json.dumps(BRIEF_SCHEMA["properties"], ensure_ascii=False)
+    )
+    content = []
+    for block in _user_content(frames, caption, client_text, duration, kind):
+        if block["type"] == "image":
+            url = f"data:image/jpeg;base64,{block['source']['data']}"
+            content.append({"type": "image_url", "image_url": {"url": url}})
+        else:
+            content.append(block)
+    errors: list[str] = []
+    for model in settings.ai_models:
+        try:
+            r = client.post("/chat/completions", json={
+                "model": model,
+                "max_tokens": 4000,
+                "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}],
+            })
+        except httpx.HTTPError as e:
+            errors.append(f"{model}: нет связи ({type(e).__name__})")
+            continue
+        if r.status_code != 200:
+            errors.append(f"{model}: HTTP {r.status_code} {r.text[:200]}")
+            continue
+        try:
+            body = r.json()
+            data = _parse_json(body["choices"][0]["message"]["content"] or "")
+        except (ValueError, KeyError, IndexError, TypeError):
+            errors.append(f"{model}: ответ не в формате JSON")
+            continue
+        if not isinstance(data, dict) or "product" not in data:
+            errors.append(f"{model}: в ответе нет нужных полей")
+            continue
+        result.model = body.get("model") or model
+        usage = body.get("usage") or {}
+        result.usage = {"input_tokens": usage.get("prompt_tokens", 0), "output_tokens": usage.get("completion_tokens", 0)}
+        result.data = data
+        return result
+    log.warning("AI brief failed: %s", errors)
+    result.error = "; ".join(errors) or "не задан AI_MODELS"
+    return result
+
+
 def make_brief(
     settings: Settings,
-    client: anthropic.Anthropic,
+    client: anthropic.Anthropic | httpx.Client,
     frames: list[Frame],
     caption: str,
     client_text: str,
@@ -180,6 +245,8 @@ def make_brief(
     if warning:
         result.notes.append(warning)
         log.warning(warning)
+    if isinstance(client, httpx.Client):
+        return _openai_brief(settings, client, frames, caption, client_text, duration, kind, catalog, result)
 
     params: dict = dict(
         model=settings.claude_model,

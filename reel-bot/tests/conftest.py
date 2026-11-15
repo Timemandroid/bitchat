@@ -85,6 +85,15 @@ def _handler(fake: Fake):
                                "headers": {k.lower(): v for k, v in self.headers.items()}})
             if self.path.startswith("/v27.0/me/subscribed_apps"):
                 return self._send(200, {"success": True})
+            if self.path.endswith("/chat/completions"):
+                if body.get("model") == "broken-model":
+                    return self._send(500, {"error": {"message": "overloaded"}})
+                text = "```json\n" + json.dumps(BRIEF, ensure_ascii=False) + "\n```"
+                return self._send(200, {
+                    "model": body.get("model", ""),
+                    "choices": [{"message": {"role": "assistant", "content": text}}],
+                    "usage": {"prompt_tokens": 5000, "completion_tokens": 200},
+                })
             if self.path.startswith("/v1/messages"):
                 if fake.claude_status != 200:
                     return self._send(fake.claude_status, {"type": "error", "error": {

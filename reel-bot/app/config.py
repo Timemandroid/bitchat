@@ -53,6 +53,10 @@ class Settings:
     claude_fallbacks: bool = True
     claude_base_url: str = ""  # пусто = официальный адрес API
     anthropic_api_key: str = ""  # пусто = SDK сам возьмёт ANTHROPIC_API_KEY
+    # Любой сервис с API в формате OpenAI (/chat/completions). Если задан, Claude не используется
+    ai_base_url: str = ""
+    ai_api_key: str = ""
+    ai_models: tuple[str, ...] = ()  # пробуются по очереди, пока одна не ответит
     brief_enabled: bool = True
     brief_language: str = "русский"
     catalog_path: str = ""
@@ -116,6 +120,9 @@ class Settings:
             claude_fallbacks=_bool("CLAUDE_FALLBACKS", True),
             claude_base_url=e("CLAUDE_BASE_URL", ""),
             anthropic_api_key=e("ANTHROPIC_API_KEY", ""),
+            ai_base_url=e("AI_BASE_URL", "").rstrip("/"),
+            ai_api_key=e("AI_API_KEY", ""),
+            ai_models=_list("AI_MODELS", ""),
             brief_enabled=_bool("BRIEF_ENABLED", True),
             brief_language=e("BRIEF_LANGUAGE", "русский"),
             catalog_path=e("CATALOG_PATH", ""),
