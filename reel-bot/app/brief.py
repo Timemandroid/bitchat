@@ -100,7 +100,8 @@ def build_client(settings: Settings) -> anthropic.Anthropic | httpx.Client:
     if settings.ai_base_url:
         return httpx.Client(
             base_url=settings.ai_base_url,
-            headers={"Authorization": f"Bearer {settings.ai_api_key}"},
+            # Cloudflare у части провайдеров блокирует стандартный User-Agent python-httpx
+            headers={"Authorization": f"Bearer {settings.ai_api_key}", "User-Agent": "Mozilla/5.0 (compatible; reel-bot/1.0)"},
             timeout=180,
         )
     kwargs: dict = {}
