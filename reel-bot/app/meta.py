@@ -84,6 +84,9 @@ def extract_incoming(body: dict) -> tuple[list[Incoming], list[dict]]:
                 if not msg or msg.get("is_echo") or msg.get("is_deleted"):
                     continue
                 mid = str(msg.get("mid", ""))
+                if not atts and msg.get("text"):
+                    # просто текст: нужен только каналу открытой линии, рилсовый режим его пропускает
+                    atts = [{"type": "text", "payload": {}}]
                 for i, a in enumerate(atts):
                     payload = a.get("payload") or {}
                     url = payload.get("url") or ""
@@ -258,3 +261,31 @@ def fetch_profile(settings: Settings, igsid: str) -> dict:
     except (httpx.HTTPError, ValueError) as e:
         log.warning("профиль клиента не получен: %s", e.__class__.__name__)
         return {}
+
+
+def send_message(settings: Settings, igsid: str, text: str = "", attachment: tuple[str, str] | None = None) -> str:
+    """Ответ клиенту в Direct. Возвращает id сообщения Instagram, при отказе бросает RuntimeError.
+
+    Meta разрешает отвечать в течение 24 часов после последнего сообщения клиента.
+    """
+    token = current_token(settings)
+    if not token:
+        raise RuntimeError("нет IG_ACCESS_TOKEN")
+    if attachment:
+        message: dict = {"attachment": {"type": attachment[0], "payload": {"url": attachment[1]}}}
+    else:
+        message = {"text": text[:1000]}
+    try:
+        r = httpx.post(
+            f"{settings.ig_graph_host}/{settings.ig_api_version}/me/messages",
+            params={"access_token": token},
+            json={"recipient": {"id": igsid}, "message": message},
+            timeout=60,
+        )
+        body = r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        raise RuntimeError(f"сетевая ошибка {e.__class__.__name__}") from e
+    if r.status_code != 200 or not body.get("message_id"):
+        err = body.get("error") or {}
+        raise RuntimeError(f"HTTP {r.status_code}: {err.get('message') or body}")
+    return str(body["message_id"])

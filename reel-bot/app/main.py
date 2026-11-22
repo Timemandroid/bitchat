@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTex
 from html import escape
 
 from . import brief as brief_mod
-from . import bitrix_setup, meta
+from . import bitrix_setup, connector, meta
 from .bitrix import Bitrix, BitrixError, load_auth, oauth_refresh, save_auth
 from .bitrix_setup import load_bot
 from .config import Settings
@@ -125,8 +125,10 @@ def create_app(settings: Settings, background_maintenance: bool = True) -> FastA
             log.info("событие: канал=%s вложения=%s эхо=%s неподдерживаемое=%s",
                      ev["channel"], ev["attachment_types"], ev["is_echo"], ev["is_unsupported"])
         queued = 0
+        # в режиме канала открытой линии в Битрикс24 уходит вся переписка, иначе только рилсы и посты
+        all_types = bool(connector.active_line(settings))
         for item in items:
-            if item.type not in settings.process_types:
+            if not all_types and item.type not in settings.process_types:
                 continue
             if store.claim(item.key):
                 background.add_task(pipeline.process, item)
@@ -193,32 +195,56 @@ def create_app(settings: Settings, background_maintenance: bool = True) -> FastA
         )
         return HTMLResponse(html, status_code=status)
 
-    def _app_open(form: dict, install: bool) -> HTMLResponse:
-        """Администратор открыл приложение: проверяем токены у Битрикс24, сохраняем, показываем настройки."""
+    def _verify_admin(form: dict, install: bool = False) -> tuple[dict | None, HTMLResponse | None]:
+        """Страницу открыл администратор нашего портала: токены перепроверяем у Битрикс24 и сохраняем."""
         try:
             auth = oauth_refresh(settings, form.get("REFRESH_ID", ""))
         except BitrixError as e:
             log.warning("приложение Битрикс24: токены не подтверждены: %s", e)
-            return _app_page("<p>Откройте приложение из меню Битрикс24.</p>", 403)
+            return None, _app_page("<p>Откройте приложение из меню Битрикс24.</p>", 403)
         saved = load_auth(settings)
         # ponytail: один портал на сервер; для Маркета хранить токены по member_id
         if saved and saved.get("member_id") != auth.get("member_id"):
             log.warning("приложение Битрикс24: попытка подключить другой портал %s", auth.get("client_endpoint"))
-            return _app_page("<p>Этот сервер уже подключён к другому Битрикс24.</p>", 403)
+            return None, _app_page("<p>Этот сервер уже подключён к другому Битрикс24.</p>", 403)
         try:
             is_admin = bool(bitrix.call("user.admin", {}, auth=auth).get("result"))
         except BitrixError as e:
-            return _app_page(f"<p>Битрикс24 не ответил: {escape(str(e))}</p>", 502)
+            return None, _app_page(f"<p>Битрикс24 не ответил: {escape(str(e))}</p>", 502)
         if not is_admin:
-            return _app_page("<p>Настраивать бота может только администратор Битрикс24.</p>", 403, install)
+            return None, _app_page("<p>Настраивать бота может только администратор Битрикс24.</p>", 403, install)
         save_auth(settings, auth)
-        return _app_status(auth["member_id"], install)
+        return auth, None
+
+    def _events_url() -> str:
+        return f"{settings.public_base_url}/bitrix/events?k={_sig('events', '0')}"
+
+    def _app_open(form: dict, install: bool) -> HTMLResponse:
+        auth, err = _verify_admin(form, install)
+        if err:
+            return err
+        lines = []
+        try:
+            connector.register(bitrix, settings, _events_url())
+        except BitrixError as e:
+            log.error("канал в Контакт-центре не зарегистрирован: %s", e)
+            lines.append(f"Канал в Контакт-центре не зарегистрирован: {e}")
+        return _app_status(auth["member_id"], install, lines)
 
     def _app_status(member_id: str, install: bool = False, log_lines: list[str] | None = None) -> HTMLResponse:
         bot = load_bot(settings)
         parts = []
         if log_lines:
             parts.append(f"<pre>{escape(chr(10).join(log_lines))}</pre>")
+        line = connector.active_line(settings)
+        if line:
+            parts.append(f"<p>Канал «{connector.CONNECTOR_NAME}» работает в открытой линии <b>{escape(line)}</b>: "
+                         "переписка, ролики и лиды видны в Контакт-центре и CRM.</p>")
+        else:
+            parts.append(f"<p>Чтобы переписка из Instagram попадала в CRM, откройте Контакт-центр, выберите "
+                         f"«{connector.CONNECTOR_NAME}» и подключите открытую линию. Родной канал Instagram "
+                         "в Контакт-центре отключите, иначе сообщения придут дважды.</p>")
+        parts.append("<h3>Чат менеджеров (необязательно)</h3>")
         if bot.get("dialog_id"):
             parts.append(f"<p>Бот подключён к чату <b>{escape(bot['dialog_id'])}</b>. "
                          "Рилсы из Instagram Direct будут приходить туда.</p>")
@@ -263,6 +289,88 @@ def create_app(settings: Settings, background_maintenance: bool = True) -> FastA
         if form.get("action") == "connect":
             return await run_in_threadpool(_app_connect, form)
         return await run_in_threadpool(_app_open, form, install)
+
+    def _connector_open(form: dict) -> HTMLResponse:
+        """Администратор нажал наш канал в Контакт-центре и выбрал открытую линию."""
+        if form.get("action") == "disconnect":
+            saved = load_auth(settings)
+            ts, line = form.get("ts", ""), form.get("line", "")
+            ok = (saved and ts.isdigit() and abs(time.time() - int(ts)) < 3600 and line.isdigit()
+                  and hmac.compare_digest(form.get("sig", ""), _sig(f"{saved.get('member_id')}:{line}", ts)))
+            if not ok:
+                return _app_page("<p>Страница устарела. Откройте канал заново в Контакт-центре.</p>", 403)
+            try:
+                connector.activate(bitrix, settings, line, on=False)
+            except BitrixError as e:
+                return _app_page(f"<p>Отключить не вышло: {escape(str(e))}</p>", 502)
+            return _app_page(f"<p>Канал отключён от линии {escape(line)}.</p>")
+        auth, err = _verify_admin(form)
+        if err:
+            return err
+        try:
+            opts = json.loads(form.get("PLACEMENT_OPTIONS") or "{}")
+        except ValueError:
+            opts = {}
+        line = str(opts.get("LINE") or "")
+        if not line.isdigit():
+            return _app_page("<p>Битрикс24 не передал номер открытой линии. Откройте канал из Контакт-центра.</p>", 400)
+        try:
+            connector.activate(bitrix, settings, line, on=True)
+        except BitrixError as e:
+            return _app_page(f"<p>Подключить канал не вышло: {escape(str(e))}</p>", 502)
+        ts = str(int(time.time()))
+        sig = _sig(f"{auth['member_id']}:{line}", ts)
+        ig = "" if settings.ig_access_token else (
+            "<p><b>Instagram ещё не подключён на сервере</b> (README, шаг 5): сообщения пока не приходят.</p>")
+        return _app_page(
+            f"<p>Канал «{connector.CONNECTOR_NAME}» подключён к открытой линии <b>{escape(line)}</b>. "
+            "Сообщения из Instagram Direct, ролики и бриф по рилсам появятся в чатах этой линии, "
+            "лиды создаст CRM по правилам линии. Ответы менеджеров уйдут клиенту в Instagram.</p>"
+            "<p>Отключите родной канал Instagram в Контакт-центре, иначе сообщения придут дважды.</p>"
+            f"{ig}<form method=post action='/bitrix/connector'><input type=hidden name=action value=disconnect>"
+            f"<input type=hidden name=line value='{escape(line)}'><input type=hidden name=ts value='{ts}'>"
+            f"<input type=hidden name=sig value='{sig}'><button>Отключить канал от линии</button></form>")
+
+    def _send_reply(msg: dict, line: str) -> None:
+        """Ответ менеджера из открытой линии уходит клиенту в Direct."""
+        mids = []
+        try:
+            if msg["text"]:
+                mids.append(meta.send_message(settings, msg["igsid"], text=msg["text"]))
+            for f in msg["files"]:
+                kind = connector.attachment_type(f["name"])
+                mids.append(meta.send_message(settings, msg["igsid"], attachment=(kind, f["link"])))
+        except RuntimeError as e:
+            # ponytail: только журнал; показать ошибку менеджеру в чате линии, если будут жалобы
+            log.error("ответ в Instagram не отправлен (чат %s): %s", msg["chat_id"], e)
+            return
+        try:
+            connector.report_delivered(bitrix, line, msg, mids)
+        except BitrixError as e:
+            log.warning("статус доставки в Битрикс24 не передан: %s", e)
+
+    @app.post("/bitrix/connector")
+    async def bitrix_connector(request: Request):
+        if not (settings.bitrix_client_id and settings.bitrix_client_secret):
+            return _app_page("<p>На сервере не заданы BITRIX_CLIENT_ID и BITRIX_CLIENT_SECRET.</p>", 503)
+        form = {k: v[0] for k, v in parse_qs((await request.body()).decode("utf-8", "replace")).items()}
+        return await run_in_threadpool(_connector_open, form)
+
+    @app.post("/bitrix/events")
+    async def bitrix_events(request: Request, background: BackgroundTasks):
+        # секрет в адресе знает только Битрикс24: адрес передаётся ему при подписке на событие
+        if not settings.bitrix_client_secret or not hmac.compare_digest(
+                request.query_params.get("k", ""), _sig("events", "0")):
+            return PlainTextResponse("forbidden", status_code=403)
+        form = {k: v[0] for k, v in parse_qs((await request.body()).decode("utf-8", "replace")).items()}
+        line = connector.active_line(settings)
+        if (form.get("event", "").upper() != "ONIMCONNECTORMESSAGEADD"
+                or form.get("data[CONNECTOR]") != connector.CONNECTOR_ID or not line
+                or str(form.get("data[LINE]", "")) != line):
+            return PlainTextResponse("ignored")
+        for msg in connector.parse_outgoing(form):
+            background.add_task(_send_reply, msg, line)
+        return PlainTextResponse("ok")
 
     @app.post("/bitrix/app")
     async def bitrix_app(request: Request):

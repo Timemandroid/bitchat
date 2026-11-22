@@ -99,9 +99,15 @@ def _handler(fake: Fake):
                                "headers": {k.lower(): v for k, v in self.headers.items()}})
             if self.path.startswith("/v27.0/me/subscribed_apps"):
                 return self._send(200, {"success": True})
+            if self.path.startswith("/v27.0/me/messages"):
+                return self._send(200, {"recipient_id": body["recipient"]["id"], "message_id": f"igm{len(fake.calls)}"})
             if fake.expire_next and body.get("auth"):
                 fake.expire_next = False
                 return self._send(401, {"error": "expired_token", "error_description": "The access token expired"})
+            if self.path.endswith("imconnector.send.messages.json"):
+                return self._send(200, {"result": {"SUCCESS": True, "DATA": {"RESULT": [{"session": {"ID": 7}}]}}})
+            if "/imconnector." in self.path or self.path.endswith("event.bind.json"):
+                return self._send(200, {"result": True})
             if self.path.endswith("user.admin.json"):
                 return self._send(200, {"result": fake.is_admin})
             if self.path.startswith("/v1/messages"):

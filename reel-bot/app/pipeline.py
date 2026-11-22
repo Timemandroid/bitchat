@@ -9,6 +9,7 @@ from pathlib import Path
 import anthropic
 
 from . import brief as brief_mod
+from . import connector
 from . import frames as frames_mod
 from . import meta
 from .bitrix import Bitrix, BitrixError, Match, build_attach
@@ -144,6 +145,32 @@ class Pipeline:
         mid, attached = with_attach_retry(lambda a: self.bitrix.send_message(dialog_id, msg, a))
         return {"chat_message_id": mid, "chat_sender": "webhook_user", "chat_attach": attached}
 
+    def _to_open_line(self, item: meta.Incoming, profile: dict, media: meta.Media, video_url: str,
+                      brief_lines: list[str], line: str) -> dict:
+        """Сообщение клиента в открытую линию, как его прислал клиент, плюс подсказка менеджеру."""
+        parts = []
+        if item.text and item.index == 0:
+            parts.append(item.text)
+        if item.type in TYPE_RU:
+            parts.append(f"[Клиент поделился: {TYPE_RU[item.type]}]")
+            if item.title:
+                parts.append(f"Подпись автора: {item.title[:600]}")
+        if media.kind not in ("video", "image", "text"):
+            parts.append(f"Вложение не скачано ({media.error}).")
+            if item.url:
+                parts.append(f"Исходная ссылка: {item.url}")
+        if brief_lines:
+            parts.append("")
+            parts.extend(brief_lines)
+        try:
+            return connector.send_incoming(
+                self.bitrix, self.s, line, msg_id=item.key, igsid=item.sender_id, profile=profile,
+                text="\n".join(parts) or " ", file_url=video_url,
+                file_name=media.path.name if media.path else "", timestamp_ms=item.timestamp)
+        except BitrixError as e:
+            log.error("сообщение в открытую линию не передано: %s", e)
+            return {"target": "none", "open_line_error": str(e)}
+
     # ------------------------------------------------------------ основной шаг
 
     def process(self, item: meta.Incoming) -> None:
@@ -156,7 +183,12 @@ class Pipeline:
             profile = meta.fetch_profile(self.s, item.sender_id)
             details["profile_found"] = bool(profile)
 
-            media = meta.download_media(self.s, item.url, work)
+            line = connector.active_line(self.s) if self.bitrix.enabled else ""
+            wants_brief = item.type in self.s.process_types
+            if item.type == "text":
+                media = meta.Media(None, "text", "", 0)
+            else:
+                media = meta.download_media(self.s, item.url, work)
             details["media"] = {"kind": media.kind, "size": media.size, "content_type": media.content_type,
                                 "error": media.error}
 
@@ -165,7 +197,9 @@ class Pipeline:
             video_url = ""
             if media.path is not None:
                 video_url = f"{self.s.public_base_url}/m/{token}/{media.path.name}"
-                if media.kind == "video":
+                if not wants_brief:
+                    pass  # обычное фото или видео клиента: только передаём в линию
+                elif media.kind == "video":
                     frames, duration = frames_mod.extract_frames(media.path, work, self.s.frames, self.s.frame_max_side)
                 else:
                     frames = frames_mod.normalize_image(media.path, work, self.s.frame_max_side)
@@ -182,13 +216,16 @@ class Pipeline:
                 details["brief_model"] = result.model
                 details["brief_usage"] = result.usage
 
-            text = self._compose(item, profile, media, video_url, duration, brief_lines)
-            details["text"] = text
-            video_path = media.path if media.kind == "video" else None
-            frame_urls = [f"{self.s.public_base_url}/m/{token}/{f.path.name}" for f in frames]
-            details["delivery"] = self._deliver(item, profile, text, [f.path for f in frames], video_path,
-                                                video_url, frame_urls)
-            status = "done" if media.path is not None else "no_media"
+            if line:
+                details["delivery"] = self._to_open_line(item, profile, media, video_url, brief_lines, line)
+            else:
+                text = self._compose(item, profile, media, video_url, duration, brief_lines)
+                details["text"] = text
+                video_path = media.path if media.kind == "video" else None
+                frame_urls = [f"{self.s.public_base_url}/m/{token}/{f.path.name}" for f in frames]
+                details["delivery"] = self._deliver(item, profile, text, [f.path for f in frames], video_path,
+                                                    video_url, frame_urls)
+            status = "done" if media.path is not None or item.type == "text" else "no_media"
         except Exception as e:  # обработка идёт в фоне, поэтому ошибку нужно записать, а не потерять
             log.exception("обработка %s не удалась", item.key)
             details["exception"] = f"{e.__class__.__name__}: {e}"

@@ -54,8 +54,9 @@ def test_extract_reads_messaging_and_standby_and_skips_echo():
          "message": {"mid": "plain", "text": "привет"}},
     ]
     items, summary = meta.extract_incoming(body)
-    assert [(i.mid, i.channel, i.type) for i in items] == [("mid-1", "standby", "ig_reel")]
-    assert items[0].title.startswith("Новая коллекция") and items[0].media_id == "987"
+    assert [(i.mid, i.channel, i.type) for i in items] == [("plain", "messaging", "text"),
+                                                          ("mid-1", "standby", "ig_reel")]
+    assert items[1].title.startswith("Новая коллекция") and items[1].media_id == "987"
     assert len(summary) == 3
     # в кратком журнале нет текста переписки
     assert "привет" not in json.dumps(summary, ensure_ascii=False)
@@ -483,3 +484,88 @@ def test_connect_from_app_page_needs_valid_signature(settings, fake):
     assert bitrix_setup.load_bot(s)["dialog_id"] == "chat42"
     # сообщения бота идут токеном приложения
     assert fake.by_path("imbot.v2.Chat.Message.send")[0]["body"]["auth"].startswith("a")
+
+
+# ------------------------------------------------------------------ канал в Контакт-центре (как у Wazzup)
+
+
+def connect_line(client, line="3"):
+    return client.post("/bitrix/connector", data={
+        "AUTH_ID": "x", "REFRESH_ID": "r0", "PLACEMENT": "SETTING_CONNECTOR",
+        "PLACEMENT_OPTIONS": json.dumps({"LINE": line, "ACTIVE_STATUS": 0})})
+
+
+def test_app_open_registers_channel_in_contact_center(settings, fake):
+    s = app_settings(settings, fake)
+    open_app(make_client(s))
+    reg = fake.by_path("imconnector.register")[0]["body"]
+    assert reg["ID"] == "reelbot_instagram"
+    assert reg["PLACEMENT_HANDLER"] == "https://reels.example.kz/bitrix/connector"
+    bind = fake.by_path("event.bind")[0]["body"]
+    assert bind["event"] == "OnImConnectorMessageAdd"
+    assert bind["handler"].startswith("https://reels.example.kz/bitrix/events?k=")
+
+
+def test_line_activation_and_text_message_goes_to_open_line(settings, fake):
+    from app import connector
+
+    s = app_settings(settings, fake)
+    c = make_client(s)
+    r = connect_line(c)
+    assert r.status_code == 200 and "подключён к открытой линии" in r.text
+    assert fake.by_path("imconnector.activate")[0]["body"] == {
+        "CONNECTOR": "reelbot_instagram", "LINE": 3, "ACTIVE": 1, "auth": "a1"}
+    assert connector.active_line(s) == "3"
+    body = {"object": "instagram", "entry": [{"id": "1", "time": 1, "messaging": [{
+        "sender": {"id": "111"}, "recipient": {"id": "1"}, "timestamp": 1731300000000,
+        "message": {"mid": "t-1", "text": "Здравствуйте, сколько стоит?"}}]}]}
+    assert post(c, body).json()["queued"] == 1
+    m = fake.by_path("imconnector.send.messages")[0]["body"]["MESSAGES"][0]
+    assert m["user"]["id"] == "111" and m["user"]["name"] == "Анна К"
+    assert m["user"]["url"] == "https://www.instagram.com/anna_k/"
+    assert m["chat"]["id"] == "111" and m["message"]["text"] == "Здравствуйте, сколько стоит?"
+    assert "files" not in m["message"]
+    # в режиме канала старый поиск лида и чат менеджеров не нужны: лид создаёт открытая линия
+    assert not fake.by_path("crm.lead.list") and not fake.by_path("im.message.add")
+
+
+def test_reel_goes_to_open_line_as_video_with_brief(settings, fake):
+    s = app_settings(settings, fake)
+    c = make_client(s)
+    connect_line(c)
+    post(c, event(f"http://127.0.0.1:{fake.port}/cdn/reel.mp4", text="есть в наличии?"))
+    m = fake.by_path("imconnector.send.messages")[0]["body"]["MESSAGES"][0]["message"]
+    assert m["id"] == "mid-1:0"
+    assert m["files"][0]["url"].startswith("https://reels.example.kz/m/") and m["files"][0]["name"] == "video.mp4"
+    assert m["text"].startswith("есть в наличии?\n[Клиент поделился: рилс]")
+    assert "куртка бомбер" in m["text"]
+
+
+def test_plain_photo_from_client_is_forwarded_without_brief(settings, fake):
+    s = app_settings(settings, fake)
+    c = make_client(s)
+    connect_line(c)
+    post(c, event(f"http://127.0.0.1:{fake.port}/cdn/reel.mp4", type_="video"))
+    assert fake.by_path("imconnector.send.messages")
+    assert not fake.by_path("/v1/messages")  # Claude не вызывался
+
+
+def test_manager_reply_goes_to_instagram_and_delivery_is_reported(settings, fake):
+    s = app_settings(settings, fake)
+    c = make_client(s)
+    connect_line(c)
+    k = hmac.new(b"app-secret-b24", b"events:0", hashlib.sha256).hexdigest()
+    form = {"event": "ONIMCONNECTORMESSAGEADD", "data[CONNECTOR]": "reelbot_instagram", "data[LINE]": "3",
+            "data[MESSAGES][0][chat][id]": "111", "data[MESSAGES][0][im][chat_id]": "55",
+            "data[MESSAGES][0][im][message_id]": "900",
+            "data[MESSAGES][0][message][text]": "[b]Ирина:[/b][br]Да, есть в наличии",
+            "data[MESSAGES][0][message][files][0][link]": "https://portal.example/file/1",
+            "data[MESSAGES][0][message][files][0][name]": "price.jpg"}
+    assert c.post("/bitrix/events?k=wrong", data=form).status_code == 403
+    assert not fake.by_path("/me/messages")
+    assert c.post(f"/bitrix/events?k={k}", data=form).text == "ok"
+    sent = [x["body"] for x in fake.by_path("/v27.0/me/messages")]
+    assert sent[0] == {"recipient": {"id": "111"}, "message": {"text": "Ирина:\nДа, есть в наличии"}}
+    assert sent[1]["message"]["attachment"] == {"type": "image", "payload": {"url": "https://portal.example/file/1"}}
+    st = fake.by_path("imconnector.send.status.delivery")[0]["body"]["MESSAGES"][0]
+    assert st["im"] == {"chat_id": "55", "message_id": "900"} and len(st["message"]["id"]) == 2
