@@ -36,10 +36,10 @@ def save_bot(settings: Settings, data: dict) -> None:
         pass
 
 
-def _need_bitrix(settings: Settings) -> Bitrix | None:
+def _need_bitrix(settings: Settings, out=print) -> Bitrix | None:
     b = Bitrix(settings)
     if not b.enabled:
-        print("В .env не задан BITRIX_WEBHOOK_URL.")
+        out("Битрикс24 не подключён: задайте BITRIX_WEBHOOK_URL или откройте приложение в Битрикс24.")
         return None
     return b
 
@@ -63,28 +63,28 @@ def cmd_chats(settings: Settings) -> int:
     return 0
 
 
-def cmd_connect(settings: Settings, dialog_id: str, code: str) -> int:
-    b = _need_bitrix(settings)
+def cmd_connect(settings: Settings, dialog_id: str, code: str, out=print) -> int:
+    b = _need_bitrix(settings, out)
     if not b:
         return 1
     dialog_id = dialog_id.strip()
     if not dialog_id.startswith("chat") or not dialog_id[4:].isdigit():
-        print("Номер чата пишется так: chat123. Список чатов: python -m app.bitrix_setup chats")
+        out("Номер чата пишется так: chat123. Список чатов: python -m app.bitrix_setup chats")
         return 1
 
     # 1. Это должен быть внутренний чат, а не переписка с клиентом
     try:
         info = b.dialog_info(dialog_id)
     except BitrixError as e:
-        print(f"Чат {dialog_id} не открылся: {e}")
-        print("Проверьте номер чата и то, что владелец вебхука в нём состоит.")
+        out(f"Чат {dialog_id} не открылся: {e}")
+        out("Проверьте номер чата и то, что владелец вебхука в нём состоит.")
         return 1
     if is_open_line(info):
-        print(f"{dialog_id} это чат открытой линии, то есть переписка с клиентом.")
-        print("Сообщение бота туда может уйти клиенту в Instagram. Выберите внутренний чат менеджеров.")
+        out(f"{dialog_id} это чат открытой линии, то есть переписка с клиентом.")
+        out("Сообщение бота туда может уйти клиенту в Instagram. Выберите внутренний чат менеджеров.")
         return 1
     title = info.get("name") or info.get("title") or dialog_id
-    print(f"Чат: {title} ({dialog_id})")
+    out(f"Чат: {title} ({dialog_id})")
 
     # 2. Бот. Токен придумываем сами и храним: повторная регистрация его не меняет
     bot = load_bot(settings)
@@ -93,35 +93,35 @@ def cmd_connect(settings: Settings, dialog_id: str, code: str) -> int:
     try:
         bot_id = b.bot_register(code, bot["bot_token"], settings.bitrix_bot_name)
     except BitrixError as e:
-        print(f"Бот не зарегистрирован: {e}")
-        print("Проверьте, что у вебхука есть право imbot и что тариф Битрикс24 разрешает REST.")
+        out(f"Бот не зарегистрирован: {e}")
+        out("Проверьте, что у вебхука есть право imbot и что тариф Битрикс24 разрешает REST.")
         return 1
     if not bot_id:
-        print("Битрикс24 не вернул номер бота.")
+        out("Битрикс24 не вернул номер бота.")
         return 1
     bot.update(bot_id=bot_id, name=settings.bitrix_bot_name)
     save_bot(settings, bot)
-    print(f"Бот «{settings.bitrix_bot_name}» готов, номер {bot_id}")
+    out(f"Бот «{settings.bitrix_bot_name}» готов, номер {bot_id}")
 
     # 3. Добавляем бота в чат от имени владельца вебхука
     try:
         b.chat_add_users(int(dialog_id[4:]), [bot_id])
-        print("Бот добавлен в чат")
+        out("Бот добавлен в чат")
     except BitrixError as e:
-        print(f"Добавить бота в чат автоматически не вышло: {e}")
+        out(f"Добавить бота в чат автоматически не вышло: {e}")
 
     # 4. Проверочное сообщение
     try:
         b.bot_send(bot_id, bot["bot_token"], dialog_id,
                    "Бот подключён. Сюда будут приходить рилсы из Instagram Direct и бриф о товаре.")
     except BitrixError as e:
-        print(f"Проверочное сообщение не отправлено: {e}")
-        print(f"Добавьте бота в чат вручную: в чате «Добавить участников», найдите «{settings.bitrix_bot_name}»,")
-        print("затем повторите эту команду.")
+        out(f"Проверочное сообщение не отправлено: {e}")
+        out(f"Добавьте бота в чат вручную: в чате «Добавить участников», найдите «{settings.bitrix_bot_name}»,")
+        out("затем повторите эту команду.")
         return 1
     bot["dialog_id"] = dialog_id
     save_bot(settings, bot)
-    print("Проверочное сообщение отправлено. Бот подключён к чату.")
+    out("Проверочное сообщение отправлено. Бот подключён к чату.")
     return 0
 
 

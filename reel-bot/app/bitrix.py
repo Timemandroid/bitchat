@@ -1,9 +1,12 @@
-"""Битрикс24 через входящий вебхук: поиск клиента, комментарий в ленту, сообщение в чат."""
+"""Битрикс24 через приложение (OAuth) или входящий вебхук: поиск клиента, комментарий в ленту, сообщение в чат."""
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import re
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -37,25 +40,112 @@ def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+_refresh_lock = threading.Lock()
+
+
+def load_auth(settings: Settings) -> dict:
+    """Токены приложения Битрикс24, сохранённые при открытии приложения администратором."""
+    try:
+        data = json.loads(settings.app_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) and data.get("access_token") else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_auth(settings: Settings, auth: dict) -> None:
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    auth = {**auth, "saved_at": time.time()}
+    settings.app_file.write_text(json.dumps(auth, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        settings.app_file.chmod(0o600)
+    except OSError:
+        pass
+
+
+def oauth_refresh(settings: Settings, refresh_token: str) -> dict:
+    """Обменивает refresh token на новые токены через сервер авторизации Битрикс24.
+
+    Ответ пришёл от oauth.bitrix.info и подписан нашим client_secret, поэтому адресу портала
+    (client_endpoint) и member_id из него можно верить, в отличие от полей формы.
+    """
+    try:
+        r = httpx.get(settings.bitrix_oauth_url, timeout=30, params={
+            "grant_type": "refresh_token",
+            "client_id": settings.bitrix_client_id,
+            "client_secret": settings.bitrix_client_secret,
+            "refresh_token": refresh_token,
+        })
+        body = r.json()
+    except httpx.HTTPError as e:
+        raise BitrixError(f"oauth: сетевая ошибка {e.__class__.__name__}") from e
+    except ValueError as e:
+        raise BitrixError(f"oauth: ответ не JSON (HTTP {r.status_code})") from e
+    if "error" in body or not body.get("access_token") or not body.get("client_endpoint"):
+        raise BitrixError(f"oauth: {body.get('error', 'нет токена')} {body.get('error_description', '')}".strip())
+    return {k: body.get(k) for k in
+            ("access_token", "refresh_token", "client_endpoint", "member_id", "user_id", "expires_in")}
+
+
 class Bitrix:
+    """Ходит в Битрикс24 токеном приложения, если приложение установлено, иначе через вебхук."""
+
     def __init__(self, settings: Settings):
         self.s = settings
-        self.base = settings.bitrix_webhook_url.rstrip("/")
-        host = urlparse(self.base).netloc
-        self.portal = f"https://{host}" if host else ""
+        self.webhook = settings.bitrix_webhook_url.rstrip("/")
+
+    def _target(self) -> tuple[str, dict]:
+        auth = load_auth(self.s)
+        if auth:
+            return auth["client_endpoint"].rstrip("/"), auth
+        return self.webhook, {}
 
     @property
     def enabled(self) -> bool:
-        return bool(self.base)
+        return bool(self._target()[0])
 
-    def call(self, method: str, params: dict, timeout: float = 60) -> dict:
+    @property
+    def portal(self) -> str:
+        host = urlparse(self._target()[0]).netloc
+        return f"https://{host}" if host else ""
+
+    def refresh(self, used_token: str) -> dict:
+        with _refresh_lock:
+            auth = load_auth(self.s)
+            if auth.get("refresh_token") != used_token:
+                return auth  # другой поток уже обновил
+            new = {**auth, **oauth_refresh(self.s, used_token)}
+            save_auth(self.s, new)
+            return new
+
+    def keep_alive(self, max_age_sec: float = 86400) -> None:
+        """refresh token живёт 28 дней: обновляем заранее, даже если рилсов не было."""
+        auth = load_auth(self.s)
+        if auth and time.time() - float(auth.get("saved_at") or 0) > max_age_sec:
+            self.refresh(auth["refresh_token"])
+
+    def _post(self, url: str, method: str, params: dict, timeout: float) -> dict:
         try:
-            r = httpx.post(f"{self.base}/{method}.json", json=params, timeout=timeout)
-            body = r.json()
+            r = httpx.post(url, json=params, timeout=timeout)
+            return r.json()
         except httpx.HTTPError as e:
             raise BitrixError(f"{method}: сетевая ошибка {e.__class__.__name__}") from e
         except ValueError as e:
             raise BitrixError(f"{method}: ответ не JSON (HTTP {r.status_code})") from e
+
+    def call(self, method: str, params: dict, timeout: float = 60, auth: dict | None = None) -> dict:
+        """auth: чужие токены (например, только что открывшего приложение), без сохранения."""
+        if auth:
+            base = auth["client_endpoint"].rstrip("/")
+        else:
+            base, auth = self._target()
+        url = f"{base}/{method}.json"
+        if auth:
+            body = self._post(url, method, {**params, "auth": auth["access_token"]}, timeout)
+            if body.get("error") == "expired_token" and auth.get("saved_at"):
+                auth = self.refresh(auth["refresh_token"])
+                body = self._post(url, method, {**params, "auth": auth["access_token"]}, timeout)
+        else:
+            body = self._post(url, method, params, timeout)
         if "error" in body:
             raise BitrixError(f"{method}: {body.get('error')} {body.get('error_description', '')}".strip())
         return body

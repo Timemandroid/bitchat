@@ -59,6 +59,10 @@ class Settings:
 
     # Битрикс24
     bitrix_webhook_url: str = ""
+    # Приложение Битрикс24 (локальное или из Маркета). Если заданы, вебхук не нужен
+    bitrix_client_id: str = ""
+    bitrix_client_secret: str = ""
+    bitrix_oauth_url: str = "https://oauth.bitrix.info/oauth/token/"
     bitrix_entity_types: tuple[str, ...] = ("lead", "contact")
     bitrix_match_window_min: int = 30
     bitrix_match_retries: int = 3
@@ -79,6 +83,10 @@ class Settings:
     @property
     def media_dir(self) -> Path:
         return self.data_dir / "media"
+
+    @property
+    def app_file(self) -> Path:
+        return self.data_dir / "bitrix_app.json"
 
     @property
     def bot_file(self) -> Path:
@@ -115,6 +123,9 @@ class Settings:
             brief_language=e("BRIEF_LANGUAGE", "русский"),
             catalog_path=e("CATALOG_PATH", ""),
             bitrix_webhook_url=e("BITRIX_WEBHOOK_URL", "").rstrip("/"),
+            bitrix_client_id=e("BITRIX_CLIENT_ID", ""),
+            bitrix_client_secret=e("BITRIX_CLIENT_SECRET", ""),
+            bitrix_oauth_url=e("BITRIX_OAUTH_URL", "https://oauth.bitrix.info/oauth/token/"),
             bitrix_entity_types=_list("BITRIX_ENTITY_TYPES", "lead,contact"),
             bitrix_match_window_min=int(e("BITRIX_MATCH_WINDOW_MIN", "30")),
             bitrix_match_retries=int(e("BITRIX_MATCH_RETRIES", "3")),

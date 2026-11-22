@@ -46,6 +46,11 @@ class Fake:
         self.bot_in_chat = False
         self.chat_add_fails = False
         self.attach_fail = False
+        # OAuth приложения Битрикс24
+        self.member_id = "m1"
+        self.is_admin = True
+        self.expire_next = False
+        self.oauth_n = 0
 
     def by_path(self, part: str) -> list[dict]:
         return [c for c in self.calls if part in c["path"]]
@@ -70,6 +75,15 @@ def _handler(fake: Fake):
                 return self._send(200, fake.video.read_bytes(), "video/mp4")
             if self.path.startswith("/cdn/page"):
                 return self._send(200, b"<html>reel page</html>", "text/html; charset=utf-8")
+            if self.path.startswith("/oauth/token/"):
+                if "refresh_token=bad" in self.path:
+                    return self._send(400, {"error": "invalid_grant"})
+                fake.oauth_n += 1
+                n = fake.oauth_n
+                return self._send(200, {
+                    "access_token": f"a{n}", "refresh_token": f"r{n}", "expires_in": 3600,
+                    "client_endpoint": f"http://127.0.0.1:{fake.port}/rest/",
+                    "member_id": fake.member_id, "user_id": 1})
             if self.path.startswith("/v27.0/me/subscribed_apps"):
                 return self._send(200, {"data": [{"subscribed_fields": ["messages"]}]})
             if self.path.startswith("/v27.0/me"):
@@ -85,6 +99,11 @@ def _handler(fake: Fake):
                                "headers": {k.lower(): v for k, v in self.headers.items()}})
             if self.path.startswith("/v27.0/me/subscribed_apps"):
                 return self._send(200, {"success": True})
+            if fake.expire_next and body.get("auth"):
+                fake.expire_next = False
+                return self._send(401, {"error": "expired_token", "error_description": "The access token expired"})
+            if self.path.endswith("user.admin.json"):
+                return self._send(200, {"result": fake.is_admin})
             if self.path.startswith("/v1/messages"):
                 if fake.claude_status != 200:
                     return self._send(fake.claude_status, {"type": "error", "error": {

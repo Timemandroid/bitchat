@@ -1,6 +1,8 @@
 """HTTP сервер: приём вебхуков Instagram и раздача сохранённых роликов по ссылке."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -8,14 +10,17 @@ import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
+from urllib.parse import parse_qs
 
 from fastapi import BackgroundTasks, FastAPI, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse
 from html import escape
 
 from . import brief as brief_mod
-from . import meta
-from .bitrix import Bitrix
+from . import bitrix_setup, meta
+from .bitrix import Bitrix, BitrixError, load_auth, oauth_refresh, save_auth
+from .bitrix_setup import load_bot
 from .config import Settings
 from .pipeline import Pipeline
 from .store import Store
@@ -45,6 +50,7 @@ def _maintenance_loop(settings: Settings, stop: threading.Event) -> None:
     while not stop.is_set():
         try:
             meta.refresh_token_if_needed(settings)
+            Bitrix(settings).keep_alive()
             removed = cleanup_media(settings)
             if removed:
                 log.info("удалено старых роликов: %s", removed)
@@ -71,7 +77,7 @@ def create_app(settings: Settings, background_maintenance: bool = True) -> FastA
         if not settings.public_base_url:
             problems.append("PUBLIC_BASE_URL пуст, ссылки на ролики будут нерабочими")
         if not bitrix.enabled:
-            problems.append("BITRIX_WEBHOOK_URL пуст, результат останется только в журнале")
+            problems.append("Битрикс24 не подключён (нет вебхука и приложение не открывали), результат останется только в журнале")
         for p in problems:
             log.warning("настройка: %s", p)
         if background_maintenance:
@@ -168,6 +174,103 @@ def create_app(settings: Settings, background_maintenance: bool = True) -> FastA
 <p>Чтобы удалить данные, которые сервис компании {c} получил из Instagram, напишите на
 <a href="mailto:{m}">{m}</a> и укажите ваш ник в Instagram. Мы удалим присланные ролики,
 кадры и записи о сообщениях в течение 30 дней и сообщим об этом в ответном письме.</p>""")
+
+    # ------------------------------------------------------------ приложение Битрикс24
+
+    def _sig(member_id: str, ts: str) -> str:
+        msg = f"{member_id}:{ts}".encode()
+        return hmac.new(settings.bitrix_client_secret.encode(), msg, hashlib.sha256).hexdigest()
+
+    def _app_page(body: str, status: int = 200, install: bool = False) -> HTMLResponse:
+        finish = "BX24.init(function(){BX24.installFinish();});" if install else ""
+        html = (
+            "<!doctype html><html lang=ru><head><meta charset=utf-8>"
+            "<script src='https://api.bitrix24.com/api/v1/'></script>"
+            "<style>body{font:15px/1.5 system-ui,sans-serif;max-width:640px;margin:24px;color:#222}"
+            "select,button{font:inherit;padding:6px 10px}pre{white-space:pre-wrap;background:#f4f6f8;"
+            "padding:12px}</style></head><body>"
+            f"<h2>{escape(settings.bitrix_bot_name)}</h2>{body}<script>{finish}</script></body></html>"
+        )
+        return HTMLResponse(html, status_code=status)
+
+    def _app_open(form: dict, install: bool) -> HTMLResponse:
+        """Администратор открыл приложение: проверяем токены у Битрикс24, сохраняем, показываем настройки."""
+        try:
+            auth = oauth_refresh(settings, form.get("REFRESH_ID", ""))
+        except BitrixError as e:
+            log.warning("приложение Битрикс24: токены не подтверждены: %s", e)
+            return _app_page("<p>Откройте приложение из меню Битрикс24.</p>", 403)
+        saved = load_auth(settings)
+        # ponytail: один портал на сервер; для Маркета хранить токены по member_id
+        if saved and saved.get("member_id") != auth.get("member_id"):
+            log.warning("приложение Битрикс24: попытка подключить другой портал %s", auth.get("client_endpoint"))
+            return _app_page("<p>Этот сервер уже подключён к другому Битрикс24.</p>", 403)
+        try:
+            is_admin = bool(bitrix.call("user.admin", {}, auth=auth).get("result"))
+        except BitrixError as e:
+            return _app_page(f"<p>Битрикс24 не ответил: {escape(str(e))}</p>", 502)
+        if not is_admin:
+            return _app_page("<p>Настраивать бота может только администратор Битрикс24.</p>", 403, install)
+        save_auth(settings, auth)
+        return _app_status(auth["member_id"], install)
+
+    def _app_status(member_id: str, install: bool = False, log_lines: list[str] | None = None) -> HTMLResponse:
+        bot = load_bot(settings)
+        parts = []
+        if log_lines:
+            parts.append(f"<pre>{escape(chr(10).join(log_lines))}</pre>")
+        if bot.get("dialog_id"):
+            parts.append(f"<p>Бот подключён к чату <b>{escape(bot['dialog_id'])}</b>. "
+                         "Рилсы из Instagram Direct будут приходить туда.</p>")
+        else:
+            parts.append("<p>Бот ещё не подключён. Выберите внутренний чат менеджеров.</p>")
+        try:
+            chats = bitrix.recent_chats()
+        except BitrixError as e:
+            chats = []
+            parts.append(f"<p>Список чатов не получен: {escape(str(e))}</p>")
+        if chats:
+            ts = str(int(time.time()))
+            opts = "".join(
+                f"<option value='{escape(str(c.get('id')))}'>{escape(str(c.get('title', '')))}</option>"
+                for c in chats)
+            parts.append(
+                "<form method=post action='/bitrix/app'>"
+                f"<input type=hidden name=action value=connect><input type=hidden name=ts value='{ts}'>"
+                f"<input type=hidden name=sig value='{_sig(member_id, ts)}'>"
+                f"<select name=dialog_id>{opts}</select> <button>Подключить к чату</button></form>"
+                "<p>В списке только групповые чаты, где вы состоите. Чаты с клиентами "
+                "(открытые линии) бот не примет.</p>")
+        ig = "подключён" if settings.ig_access_token else "не подключён (см. README, шаг 5)"
+        parts.append(f"<p>Instagram: {ig}.</p>")
+        return _app_page("".join(parts), install=install)
+
+    def _app_connect(form: dict) -> HTMLResponse:
+        saved = load_auth(settings)
+        ts = form.get("ts", "")
+        ok = (saved and ts.isdigit() and abs(time.time() - int(ts)) < 3600
+              and hmac.compare_digest(form.get("sig", ""), _sig(str(saved.get("member_id")), ts)))
+        if not ok:
+            return _app_page("<p>Страница устарела. Откройте приложение заново из меню Битрикс24.</p>", 403)
+        lines: list[str] = []
+        bitrix_setup.cmd_connect(settings, form.get("dialog_id", ""), bitrix_setup.DEFAULT_CODE, out=lines.append)
+        return _app_status(str(saved["member_id"]), log_lines=lines)
+
+    async def _bitrix_app(request: Request, install: bool):
+        if not (settings.bitrix_client_id and settings.bitrix_client_secret):
+            return _app_page("<p>На сервере не заданы BITRIX_CLIENT_ID и BITRIX_CLIENT_SECRET.</p>", 503)
+        form = {k: v[0] for k, v in parse_qs((await request.body()).decode("utf-8", "replace")).items()}
+        if form.get("action") == "connect":
+            return await run_in_threadpool(_app_connect, form)
+        return await run_in_threadpool(_app_open, form, install)
+
+    @app.post("/bitrix/app")
+    async def bitrix_app(request: Request):
+        return await _bitrix_app(request, install=False)
+
+    @app.post("/bitrix/install")
+    async def bitrix_install(request: Request):
+        return await _bitrix_app(request, install=True)
 
     @app.get("/m/{token}/{name}")
     def media(token: str, name: str):

@@ -407,3 +407,79 @@ def test_privacy_pages(settings):
     r = c.get("/privacy")
     assert r.status_code == 200 and "ТОО &lt;Тест&gt;" in r.text and "info@example.kz" in r.text
     assert c.get("/data-deletion").status_code == 200
+
+
+# ------------------------------------------------------------------ приложение Битрикс24
+
+
+def app_settings(settings, fake):
+    return replace(settings, bitrix_webhook_url="", bitrix_client_id="local.1",
+                   bitrix_client_secret="app-secret-b24",
+                   bitrix_oauth_url=f"http://127.0.0.1:{fake.port}/oauth/token/")
+
+
+def open_app(client, path="/bitrix/app", refresh="r0"):
+    return client.post(path, data={"AUTH_ID": "x", "REFRESH_ID": refresh, "member_id": "m1",
+                                   "DOMAIN": "evil.example"})
+
+
+def test_app_install_saves_verified_tokens_and_lists_chats(settings, fake):
+    from app.bitrix import load_auth
+
+    s = app_settings(settings, fake)
+    fake.recent = [{"id": "chat42", "title": "Менеджеры"}]
+    r = open_app(make_client(s), "/bitrix/install")
+    assert r.status_code == 200
+    assert "installFinish" in r.text and "Менеджеры" in r.text
+    auth = load_auth(s)
+    # адрес портала берётся из ответа сервера авторизации, а не из поля DOMAIN формы
+    assert auth["client_endpoint"] == f"http://127.0.0.1:{fake.port}/rest/" and auth["member_id"] == "m1"
+    assert fake.by_path("user.admin")[0]["body"]["auth"] == "a1"
+
+
+def test_app_refuses_fake_tokens_non_admin_and_other_portal(settings, fake):
+    from app.bitrix import load_auth
+
+    s = app_settings(settings, fake)
+    c = make_client(s)
+    assert open_app(c, refresh="bad").status_code == 403
+    fake.is_admin = False
+    assert open_app(c).status_code == 403
+    assert load_auth(s) == {}
+    fake.is_admin = True
+    assert open_app(c).status_code == 200
+    fake.member_id = "m2"
+    assert open_app(c).status_code == 403
+    assert load_auth(s)["member_id"] == "m1"
+
+
+def test_expired_token_is_refreshed_once_and_saved(settings, fake):
+    from app.bitrix import Bitrix, load_auth
+
+    s = app_settings(settings, fake)
+    open_app(make_client(s))
+    before = load_auth(s)
+    fake.expire_next = True
+    assert Bitrix(s).dialog_info("chat42")["name"] == "Менеджеры"
+    after = load_auth(s)
+    assert after["access_token"] != before["access_token"]
+    assert fake.by_path("im.dialog.get")[-1]["body"]["auth"] == after["access_token"]
+
+
+def test_connect_from_app_page_needs_valid_signature(settings, fake):
+    import re
+    from app import bitrix_setup
+
+    s = app_settings(settings, fake)
+    fake.recent = [{"id": "chat42", "title": "Менеджеры"}]
+    c = make_client(s)
+    page = open_app(c).text
+    ts = re.search(r"name=ts value='(\d+)'", page).group(1)
+    sig = re.search(r"name=sig value='([0-9a-f]+)'", page).group(1)
+    bad = c.post("/bitrix/app", data={"action": "connect", "ts": ts, "sig": "0" * 64, "dialog_id": "chat42"})
+    assert bad.status_code == 403 and not bitrix_setup.load_bot(s)
+    r = c.post("/bitrix/app", data={"action": "connect", "ts": ts, "sig": sig, "dialog_id": "chat42"})
+    assert r.status_code == 200 and "Бот подключён к чату" in r.text
+    assert bitrix_setup.load_bot(s)["dialog_id"] == "chat42"
+    # сообщения бота идут токеном приложения
+    assert fake.by_path("imbot.v2.Chat.Message.send")[0]["body"]["auth"].startswith("a")
