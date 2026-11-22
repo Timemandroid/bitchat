@@ -84,6 +84,10 @@ def _handler(fake: Fake):
                     "access_token": f"a{n}", "refresh_token": f"r{n}", "expires_in": 3600,
                     "client_endpoint": f"http://127.0.0.1:{fake.port}/rest/",
                     "member_id": fake.member_id, "user_id": 1})
+            if self.path.startswith("/v27.0/5550001?fields=access_token"):
+                return self._send(200, {"access_token": "PAGE-TOKEN", "id": "5550001"})
+            if self.path.startswith("/v27.0/5550001/subscribed_apps"):
+                return self._send(200, {"data": [{"subscribed_fields": ["messages"]}]})
             if self.path.startswith("/v27.0/me/subscribed_apps"):
                 return self._send(200, {"data": [{"subscribed_fields": ["messages"]}]})
             if self.path.startswith("/v27.0/me"):
@@ -99,6 +103,10 @@ def _handler(fake: Fake):
                                "headers": {k.lower(): v for k, v in self.headers.items()}})
             if self.path.startswith("/v27.0/me/subscribed_apps"):
                 return self._send(200, {"success": True})
+            if self.path.startswith("/v27.0/5550001/subscribed_apps"):
+                return self._send(200, {"success": True})
+            if self.path.startswith("/v27.0/5550001/messages"):
+                return self._send(200, {"recipient_id": body["recipient"]["id"], "message_id": "igm-page"})
             if self.path.startswith("/v27.0/me/messages"):
                 return self._send(200, {"recipient_id": body["recipient"]["id"], "message_id": f"igm{len(fake.calls)}"})
             if fake.expire_next and body.get("auth"):

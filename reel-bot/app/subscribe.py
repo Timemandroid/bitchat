@@ -12,16 +12,18 @@ from . import meta
 
 
 def run(settings: Settings, fields: str = "messages") -> bool:
-    token = meta.current_token(settings)
+    token = meta.api_token(settings)
     if not token:
         print("В .env не задан IG_ACCESS_TOKEN.")
         return False
     base = f"{settings.ig_graph_host}/{settings.ig_api_version}"
     ok = True
+    n = meta.node(settings)
+    who = {"fields": "name,instagram_business_account"} if settings.ig_page_id else {"fields": "user_id,username"}
     steps = [
-        ("Аккаунт", "GET", f"{base}/me", {"fields": "user_id,username"}),
-        ("Включение подписки", "POST", f"{base}/me/subscribed_apps", {"subscribed_fields": fields}),
-        ("Текущие подписки", "GET", f"{base}/me/subscribed_apps", {}),
+        ("Аккаунт", "GET", f"{base}/{n}", who),
+        ("Включение подписки", "POST", f"{base}/{n}/subscribed_apps", {"subscribed_fields": fields}),
+        ("Текущие подписки", "GET", f"{base}/{n}/subscribed_apps", {}),
     ]
     for title, method, url, params in steps:
         try:

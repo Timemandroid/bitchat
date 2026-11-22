@@ -569,3 +569,16 @@ def test_manager_reply_goes_to_instagram_and_delivery_is_reported(settings, fake
     assert sent[1]["message"]["attachment"] == {"type": "image", "payload": {"url": "https://portal.example/file/1"}}
     st = fake.by_path("imconnector.send.status.delivery")[0]["body"]["MESSAGES"][0]
     assert st["im"] == {"chat_id": "55", "message_id": "900"} and len(st["message"]["id"]) == 2
+
+
+def test_unified_login_uses_page_token_and_page_node(settings, fake):
+    """Новые приложения Meta работают через единый вход: маркер системного пользователя и страницу."""
+    from app import meta, subscribe
+
+    s = replace(settings, ig_page_id="5550001", ig_access_token="EAA-system-user-token")
+    assert meta.refresh_token_if_needed(s) == "маркер системного пользователя бессрочный"
+    meta.send_message(s, "111", text="Здравствуйте")
+    sent = fake.by_path("/v27.0/5550001/messages")[0]
+    assert "access_token=PAGE-TOKEN" in sent["path"]
+    assert subscribe.run(s)
+    assert fake.by_path("/v27.0/5550001/subscribed_apps")

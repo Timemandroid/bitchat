@@ -205,10 +205,36 @@ def current_token(settings: Settings) -> str:
     return settings.ig_access_token
 
 
+_page_tokens: dict[str, str] = {}
+
+
+def node(settings: Settings) -> str:
+    """От чьего имени работаем: страница Facebook (единый вход) или аккаунт Instagram (вход через Instagram)."""
+    return settings.ig_page_id or "me"
+
+
+def api_token(settings: Settings) -> str:
+    """При едином входе нужен маркер страницы. Его выдаёт Meta по маркеру системного пользователя."""
+    token = current_token(settings)
+    if not settings.ig_page_id or not token:
+        return token
+    if token not in _page_tokens:
+        try:
+            r = httpx.get(f"{settings.ig_graph_host}/{settings.ig_api_version}/{settings.ig_page_id}",
+                          params={"fields": "access_token", "access_token": token}, timeout=20)
+            _page_tokens[token] = str(r.json().get("access_token") or "") or token
+        except (httpx.HTTPError, ValueError) as e:
+            log.warning("маркер страницы не получен (%s), работаю маркером из .env", e.__class__.__name__)
+            return token
+    return _page_tokens[token]
+
+
 def refresh_token_if_needed(settings: Settings, min_age_days: float = 7.0) -> str:
-    """Долгий токен живёт 60 дней. Обновляем заранее, не чаще раза в неделю."""
+    """Долгий токен Instagram живёт 60 дней. Обновляем заранее, не чаще раза в неделю."""
     if not settings.ig_access_token:
         return "нет токена"
+    if settings.ig_page_id:
+        return "маркер системного пользователя бессрочный"
     tf = _token_file(settings)
     now = time.time()
     try:
@@ -244,7 +270,7 @@ def refresh_token_if_needed(settings: Settings, min_age_days: float = 7.0) -> st
 
 def fetch_profile(settings: Settings, igsid: str) -> dict:
     """Имя и ник клиента. Запрос необязательный: при ошибке работаем без него."""
-    token = current_token(settings)
+    token = api_token(settings)
     if not token or not igsid:
         return {}
     try:
@@ -268,7 +294,7 @@ def send_message(settings: Settings, igsid: str, text: str = "", attachment: tup
 
     Meta разрешает отвечать в течение 24 часов после последнего сообщения клиента.
     """
-    token = current_token(settings)
+    token = api_token(settings)
     if not token:
         raise RuntimeError("нет IG_ACCESS_TOKEN")
     if attachment:
@@ -277,7 +303,7 @@ def send_message(settings: Settings, igsid: str, text: str = "", attachment: tup
         message = {"text": text[:1000]}
     try:
         r = httpx.post(
-            f"{settings.ig_graph_host}/{settings.ig_api_version}/me/messages",
+            f"{settings.ig_graph_host}/{settings.ig_api_version}/{node(settings)}/messages",
             params={"access_token": token},
             json={"recipient": {"id": igsid}, "message": message},
             timeout=60,
